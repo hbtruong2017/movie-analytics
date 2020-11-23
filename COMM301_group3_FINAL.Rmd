@@ -1,0 +1,1544 @@
+---
+title: "Analysing IMDb Movies Ratings"
+author: "Anish Kishor, Chua Yi Rui, Joel Ng Jing Long, Kok Jim Meng, Truong Hai Bang"
+date: "22 November 2020"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Analysing IMDb Movies Ratings
+
+# 1. Problem Statement
+
+In recent years, there has been a rush towards creating more digital content to capture user attention. Streaming services like Netflix, Disney+ and AppleTV are creating their own content that could rival existing film production companies. With more digital content and content producers, competition between film companies for viewership are heating up. Hence, it is becoming increasingly urgent and important to understand the factors that result in successful movies. 
+
+To understand the factors that result in successful movies, our team has decided to analyse IMDB’s official dataset (IMDb, n.d.), given that the company does not permit any form of web scraping on its site. The dataset contained over 100,000 movies since 1900 and provides a variety of information such as ratings, number of votes, genre, duration and publishing year. 
+
+Based on research, it was only in the late 1980s, where the modern trends of movies having a higher proportion of foreign box office than domestic ticket sales occur (Hall & Neale, 2010), suggesting that more international audiences viewed the movie than in the country of production. Hence, to provide an analysis of movies that will more likely suit global audiences, our team has decided to restrict the analysis to only movies produced from 1990 to 2019.   
+
+Our project is exploratory in nature and it aims to: 
+
+1) Examine if genre, duration of movie and year of release will affect the success (ratings) of the movies from 1990 to 2019. 
+
+2) Create a model to measure the effect of genre on the ratings of movies.
+
+3) If point 2 is true, check if there is any effect of movie duration on genre and ratings.
+
+For this data science project, we have activated the following packages:
+
+```{r message = FALSE, warning = FALSE}
+library(tidyverse)
+library(lubridate)
+library(gridExtra)
+library(grid)
+library(RColorBrewer)
+library(wordcloud2)
+library(broom.mixed)
+library(haven) 
+library(broom)
+library(gvlma) 
+library(jtools)
+library(huxtable) 
+library(ggfortify)
+library(knitr)
+library(kableExtra)
+library(ggrepel)
+library(ggthemes)
+library(sandwich) 
+library(psych)
+library(Hmisc) 
+library(ggcorrplot)
+library(ggstance)
+library(car)
+library(plotly)
+library(gtrendsR)
+library(ggiraph)
+library(interactions)
+library(shiny)
+library(ggwordcloud)
+library(httr)
+library(jsonlite)
+library(textdata)
+library(tibble)
+library(here)
+library(rvest)
+library(glue)
+library(tidytext)
+
+options(shiny.sanitize.errors = TRUE)
+options(scipen = 9999)
+```
+
+# 2. Import
+
+Here, we import the IMDb official datasets. The datasets were downloaded from [https://datasets.imdbws.com/](https://datasets.imdbws.com/)
+
+```{r message=FALSE, warning=FALSE}
+title_basics <- read_tsv("title_basics.tsv")
+ratings <- read_tsv("ratings.tsv")
+```
+
+```{r echo=TRUE}
+glimpse(title_basics)
+glimpse(ratings)
+```
+
+## 2.1 Variables
+
+The title_basics dataset consists of **9** variables and **5,751,919** observations, and the ratings dataset consists of **3** variables and **1,086,028**.\
+The variables that will be selected in this study are:
+
+* Title of the movies (`primaryTitle`)
+* Year of the movies released (`startYear`)
+* Duration of the movies (`runtimeMinutes`)
+* Genres of the movies (`genres`)
+* Weighted average rating of the movies (`averageRating`)
+* Number of votes the movies received (`numVotes`)
+
+# 3. Tidy & Transform
+
+## 3.1 Merging of datasets
+
+For our analysis, the two datasets are merged by `inner_join` method based on the unique identifier, `tconst`, which is the title ID of the movies. This ensures all rows of both tables are selected based on the matched `tconst` column.
+
+```{r}
+movies_dataset <- inner_join(title_basics, ratings, by = "tconst", copy = FALSE, suffix = c(".title_basics", ".ratings"))
+
+glimpse(movies_dataset)
+```
+
+## 3.2 Filtering unneccesary variables and data 
+
+Firstly, we narrow down the release year of the movies to **1990 to 2019** inclusive. This period was selected as 1990s is the period where foreign box office outpace the domestic box office of movies (Hall & Neale, 2010). In addition, given that this project is done in 2020, the dataset for the year is incomplete.
+
+Secondly, as the IMDb dataset include different types of content (`titleType`) such as dramas and games, only  `movie` and `tvMovie`  was included, since this study is specific to movies.
+
+Thirdly, we have removed the following variables/columns that are not relevant to our analysis:
+
+* `originalTitle` - Name of movie title in different countries
+* `isAdult` - Whether the movie is labeled as an Adult content
+* `endYear` - The year where the movie stopped screening
+
+```{r}
+movies_dataset <- movies_dataset %>% 
+  filter(titleType %in% c("movie", "tvMovie")) %>% 
+  select(-originalTitle, -isAdult, -endYear)
+
+movies_dataset <- movies_dataset %>% 
+  filter(startYear %in% c(1990:2019))
+
+glimpse(movies_dataset)
+```
+
+## 3.3 Removing empty values in the dataset
+
+Now, we check for the presence of `\N` values in the dataset to remove empty values in the dataset.
+
+```{r}
+map(movies_dataset, ~sum("\\N" %in% .))
+```
+
+From the above results, there are  some `\N` in the dataset under the variables of `runtimeMinutes` and `genres`. Therefore, we removed `\N` observations in the dataset in these two variables.
+
+```{r}
+movies_dataset <- movies_dataset %>% 
+  filter(runtimeMinutes != "\\N", genres != "\\N")
+
+glimpse(movies_dataset)
+```
+
+
+## 3.4 Binning of release year of movies
+
+Next, to see see if there are any trends in different time periods, the release year of the movies were binned into 5-year groups. The bins of the release years are as follows:
+
+* `1990`: Between `1990` to `1994`
+* `1995`: Between `1995` to `1999`
+* `2000`: Between `2000` to `2004`
+* `2005`: Between `2005` to `2009`
+* `2010`: Between `2010` to `2014`
+* `2015`: Between `2015` to `2019`
+
+```{r}
+movies_dataset <- movies_dataset %>% 
+  mutate(Five_Year =
+           ifelse(startYear >= 1990 & startYear < 1995, "1990",
+                  ifelse(startYear >= 1995 & startYear < 2000, "1995",
+                         ifelse(startYear >= 2000 & startYear < 2005, "2000",
+                                ifelse(startYear >= 2005 & startYear < 2010, "2005",
+                                       ifelse(startYear >= 2010 & startYear < 2015, "2010",
+                                              ifelse(startYear >= 2015, "2015", NA_real_)))))))
+
+glimpse(movies_dataset)
+```
+
+## 3.5 Selection of genre
+
+In the `genre` column, movies have 1-3 genres that are randomly ordered. Hence, the team has built a random function to randomly select one of the genres as the `Final_Genre` variable, which would be used for further analysis.
+
+```{r}
+generate_genre <- function(text) {
+  splitted <- strsplit(text, ",")
+  no_of_genre <- length(unlist(splitted))
+  random_number <- sample(1:no_of_genre, 1)
+  result <- unlist(splitted)[random_number]
+  return(result)
+}
+
+movies_dataset <- movies_dataset %>% 
+  rowwise() %>% 
+  mutate(Final_Genre = generate_genre(genres))
+
+glimpse(movies_dataset)
+```
+
+## 3.6 Removing movies with less than 1,000 votes
+
+The team has decided to only analyse choose movies with **at least 1,000 votes** to ensure that the ratings are representative and reliable. 
+
+```{r}
+movies_dataset <- movies_dataset %>% 
+  filter(numVotes >= 1000)
+```
+
+## 3.7 Removing outliers in average rating 
+
+As `averageRating` is the dependent variable for this project, the team has decided to check for the presence of outliers. 
+
+```{r}
+checking_rating_outlier <- movies_dataset %>% 
+  ggplot(aes(y = averageRating)) +
+  geom_boxplot() +
+  labs(title = "IMDb Movies Rating Distribution",
+       subtitle = "Presence of extreme outliers",
+       caption = "Source: IMDb",
+       y = "Rating") + 
+  theme_linedraw()
+
+ggplotly(checking_rating_outlier)
+
+```
+
+From the boxplot diagram, extreme rating outliers can be observed where the rating is **below 3.3**. Hence, the outliers are removed by using the outlier function provided by Assistant Professor S. Roh.  
+
+```{r}
+remove_outliers <- function(x, na.rm = T, ...) {
+  qnt <- quantile(x, probs=c(.25, .75), na.rm = na.rm, ...)
+  H <- 1.5 * IQR(x, na.rm = na.rm)
+  y <- x
+  y[x < (qnt[1] - H)] <- NA
+  y[x > (qnt[2] + H)] <- NA
+  y
+}
+
+movies_dataset$averageRating_cleaned <- remove_outliers(movies_dataset$averageRating)
+
+movies_cleaned_dataset <- movies_dataset %>% drop_na() %>% select(-averageRating_cleaned)
+```
+
+To check if the outliers have been removed, a  boxplot is created to show the distribution of movie ratings before and after of the removal of outliers. Visually, it appears that most outliers have been removed.
+
+```{r}
+removed_rating_outlier <- movies_cleaned_dataset %>% 
+  ggplot(aes(y = averageRating)) +
+  geom_boxplot() +
+  labs(title = "IMDb Movies Rating Distribution",
+       subtitle = "Removal of extreme outliers",
+       caption = "Source: IMDb",
+       y = "Rating") +
+  theme_linedraw()
+
+grid.arrange(checking_rating_outlier, removed_rating_outlier, ncol = 2)
+```
+
+## 3.8 Removing genres with less than 100 movies
+
+To ensure that the analysis is reliable and representative, our team has decided to remove genres that have less than **100 movies** in the 20 year period.
+
+```{r}
+num_movies_per_genre <- movies_cleaned_dataset %>% 
+  group_by(Final_Genre) %>% 
+  summarise(No_of_Movies = n()) %>% 
+  arrange(desc(No_of_Movies))
+
+knitr::kable(num_movies_per_genre,align = "lc", format = "html") %>%
+    kable_styling()
+```
+
+To detect genres with at least 100 movies, we create an empty vector (`result_list`) to contain those genres.
+
+```{r}
+result_list <- c()
+
+for (i in 1:nrow(num_movies_per_genre)) {
+  if (num_movies_per_genre$No_of_Movies[i] >= 100) {
+    result_list <- c(num_movies_per_genre$Final_Genre[i], result_list)
+  }
+}
+
+result_list
+```
+
+To ensure that the randomly generated list of genres will only contain movies with >= 100 movies, the `result_list` created above will be used to filter those genres.
+
+```{r}
+movies_cleaned_dataset <- movies_cleaned_dataset %>% 
+                  filter(Final_Genre %in% result_list)
+```
+
+## 3.9 Binning of movie duration
+
+The team has binned the duration of the movies into **5 categories** based on **percentile**. This is to help us to create categorical variables for duration that would be beneficial for further analysis. Furthermore, we did further transformation of the `runtimeMinutes` variable to transform it into a numerical variable.
+
+```{r}
+movies_cleaned_dataset$runtimeMinutes = as.numeric(movies_cleaned_dataset$runtimeMinutes)
+```
+
+The quantile function was used to identify the movie duration in minutes for each percentile group. 
+
+```{r}
+
+quantiles <- quantile(movies_cleaned_dataset$runtimeMinutes, c(.20, .40, .60, .80, 1))
+
+knitr::kable(quantiles,align = "c", col.names = "Duration of Movie (mins)", format = "html") %>%
+  kable_styling()
+```
+
+Now, it's time for us to categorise the duration of the movies into five categories:
+
+* `Very Short`: Within the 20th percentile
+* `Short`: Between the 21st percentile to 40th percentile
+* `Just Nice`: Between the 41st percentile to 60th percentile
+* `Long`: Between the 61st percentile to 80th percentile
+* `Extremely Long`: Between the 81st percentile to 100th percentile
+
+```{r}
+movies_cleaned_dataset <- movies_cleaned_dataset %>% 
+  mutate(Types_of_Duration =
+           ifelse(runtimeMinutes <= 90, "Very Short",
+                  ifelse(runtimeMinutes > 90 & runtimeMinutes <= 97, "Short",
+                         ifelse(runtimeMinutes > 97 & runtimeMinutes <= 105, "Just Nice",
+                                ifelse(runtimeMinutes > 105 & runtimeMinutes <= 119, "Long",
+                                       ifelse(runtimeMinutes > 119 & runtimeMinutes <= 467, "Extremely Long", NA_real_))))))
+
+glimpse(movies_cleaned_dataset)
+```
+
+## 3.10 Removing and Renaming variables 
+
+Moving on, we are going to remove irrelevant variables and rename the variables' names into meaningful names.
+
+The title id `tconst` and title type `titleType` are removed since the unique identifiers are not neccesary for the project's analysis
+
+The following variable names renamed:
+
+* `primaryTitle` cleansed to `Movie`
+* `startYear` cleansed to `Year`
+* `runtimeMinutes` cleansed to `Duration`
+* `genres` cleansed to `Genres`
+* `averageRating` cleansed to `Rating`
+* `numVotes` cleansed to `Num_of_Votes`
+
+```{r}
+movies_cleaned_dataset <- movies_cleaned_dataset %>% 
+  select(-tconst, -titleType)
+
+movies_cleaned_dataset <- movies_cleaned_dataset %>% 
+  rename(Movie = primaryTitle,
+         Year = startYear,
+         Duration = runtimeMinutes,
+         Genres = genres,
+         Rating = averageRating,
+         Num_of_Votes = numVotes)
+
+glimpse(movies_cleaned_dataset)
+```
+
+## 3.11 Ensure no null values in the tidied dataset 
+
+Finally, let's ensure that there is no presence of NAs in the cleaned dataset. Great! There is no NAs present in the cleaned dataset.
+
+```{r}
+map(movies_cleaned_dataset, ~sum(is.na(.)))
+```
+
+
+## 3.12 Export and Import final dataset
+
+Given that the genres are randomly selected (shown in Section 3.4), the dataset will differ slightly every iteration of the Rmarkdown. Hence, our group has exported a version of the dataset based on the above tidy process. In this section, we will read the dataset that will be used for further analysis.
+
+```{r}
+#write.csv(movies_cleaned_dataset,"final_imdb_dataset.csv", fileEncoding = "UTF-8", row.names = FALSE)
+dataset <- read_csv("final_imdb_dataset.csv")
+dataset$Final_Genre[dataset$Final_Genre == "Sci-Fi"] <- "SciFi"
+glimpse(dataset)
+
+unique_values <- sapply(dataset, function(x) length(unique(x)))
+unique_values
+```
+
+Now, let's start our **Exploratory Data Analysis (EDA)**!
+
+# 4. Exploratory Data Analysis
+
+## 4.1 Visualisation of Number of Movies per Genre
+
+In the `Movie` variable, there are **20268 unique categories**. Additionally, in the `Final_Genre` variable, there are **19 unique categories**. From the word cloud, **Drama** has the most number of movies while **Sport** have the least number of movies.
+
+```{r message = FALSE, echo = FALSE}
+dataset %>%
+  select(Final_Genre,Movie) %>%
+  distinct() %>%
+  group_by(Final_Genre) %>%
+  summarise(Total = n()) %>%
+  wordcloud2(backgroundColor ="White",
+             color = "random-dark",
+             minRotation = 0,
+             maxRotation = 0)
+
+```
+
+## 4.2 Visualisation of Ratings by Genre
+
+### 4.2.1 Barplot of average Ratings of Genre
+
+Based on the bar chart, the the top 3 highest rated movie genres are **Documentary**, **Biography** and **War**. The lowest 3 rated genres are **Thriller**, **Sci-Fi** and **Horror**.
+
+```{r message = FALSE, echo = FALSE}
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+
+genre_rating_interactive <- dataset %>%
+  select(Final_Genre, Rating, Movie) %>%
+  distinct() %>%
+  group_by(Final_Genre) %>%
+  summarise(average_rating = mean(Rating)) %>%
+  arrange(.,average_rating) %>%
+  ggplot(aes(x= reorder(Final_Genre,average_rating), y=average_rating, fill= Final_Genre)) +
+  geom_bar_interactive(stat="identity", aes(tooltip = round(average_rating,2))) +
+  scale_fill_manual(values = getPalette(length(unique(movies_cleaned_dataset$Final_Genre))), guide = "none") +
+  scale_y_continuous(breaks = 0:10) +
+  coord_cartesian(ylim=c(5,7.4)) +
+  theme(text = element_text(size=20)) +
+  theme_linedraw() + 
+  labs (x = "Genre of Movie",
+        y = "Average Rating",
+        title ="Average rating of movies produced each year from 1990-2019",
+        subtitle = "Documentary, Biography, and War are the Top 3 Highest Rated Genres",
+        caption = "Source: IMDB") +
+  theme(axis.text.x = element_text(angle = 20))
+  
+girafe(ggobj = genre_rating_interactive)
+```
+
+### 4.2.2 Boxplot of Ratings of Genre
+
+From the boxplot diagram, `Comedy` and `Mystery` have similar mean and interquartile range rating. `Family` and `Adventure` have similar mean and interquaritle range rating. `History` and `Music` have similar mean and interquaritle range rating.
+
+```{r message = FALSE, echo = FALSE}
+genre_boxplot <- dataset %>% 
+  ggplot(aes(x = reorder(Final_Genre, Rating, median, fill = Final_Genre), y = Rating)) +
+  geom_boxplot(stat = "boxplot", aes(fill = Final_Genre), outlier.size = 0.1) +
+  stat_summary(fun = mean, geom="point", shape=20, size=2, color="red", fill="red") +
+  labs(x = "Genre", y = "Rating",
+       title = "Rating vs Genre of Movie ",
+       caption = "Source: IMDB") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 20)) +
+  theme(legend.position="none")
+
+ggplotly(genre_boxplot)
+
+```
+
+### 4.2.3 Average Rating of each Genre over the Years
+
+Among the 19 genres, majority of the genres are decreasing in average ratings over the years from 1990 to 2019. The only exceptions are `Family`, `Music`, `Sci-Fi`, and `Sport`that has been increasing in average ratings.
+
+```{r message = FALSE, echo = FALSE}
+dataset %>%
+  select(Final_Genre, Rating, Year, Movie) %>%
+  distinct() %>%
+  group_by(Final_Genre,Year) %>%
+  summarise(avg_rating = mean(Rating)) %>% 
+  ggplot(aes(x = Year, y = avg_rating)) +
+  geom_point() + 
+  geom_smooth(method = "lm", formula = y~x, se = 0.95) + 
+  scale_y_continuous() +
+  facet_wrap(.~Final_Genre, scales = "free_y") + 
+  aes(fill = as.factor(Final_Genre)) +
+  labs(x = "Year", y = "Average Rating",
+       title = "Ratings of Movies over the years (1990-2019) by Genres",
+       subtitle = "General increase in ratings in Family, Music, Sci-Fi and Sport") +
+       theme_linedraw() + 
+       theme(legend.position = "none")
+```
+
+## 4.3 Visualisation of Ratings by Duration
+
+### 4.3.1 Scatterplot of Ratings by Duration
+
+Based on the scatter plot, there appears to be a general trend where the longer the movie duration, the higher the movie rating.
+
+```{r message = FALSE, echo = FALSE}
+duration_rating <- dataset %>%
+  distinct() %>%
+  group_by(Duration) %>%
+  summarise(avg_rating = mean(Rating)) %>%
+  ggplot(aes(x = Duration, y= avg_rating)) +
+ geom_point(aes(color = avg_rating)) +
+  geom_smooth(method  ="loess",formula = y~x) +
+  scale_x_continuous(breaks = seq(50, 500, by = 50)) +
+  labs(x = "Duration", y = "Average Rating",
+       title = "Ratings of Movies over the years (1990-2019) by duration",
+       subtitle = "General increase in ratings as duration increases") +
+  theme_linedraw()
+ggplotly(duration_rating)
+```
+
+### 4.3.2 Barplot of Ratings by Duration bins
+
+From the bar chart based on the 5 movie duration bins, there is a similar trend where movies with longer duration have higher average rating. Both `Very Short` and `Short` duration of movies have similar average rating while the average rating increases from `Just Nice` to `Long` to `Extremely Long` duration of movies.
+
+Bins for Movie duration (minutes):
+
+* `Very Short`: < 90 
+* `Short`: 91 - 97
+* `Just Nice`: 98 - 105 
+* `Long`: 106 - 119
+* `Extremely Long`: 119 - 467
+
+```{r message = FALSE, echo = FALSE}
+duration_bin_rating <- dataset %>%
+  select(Types_of_Duration,Rating,Movie) %>%
+  distinct() %>%
+  group_by(Types_of_Duration) %>%
+  summarise(avg_rating = mean(Rating))   %>%
+  mutate(Types_of_Duration = factor(Types_of_Duration, levels = c("Very Short","Short","Just Nice", "Long", "Extremely Long"))) %>%
+  ggplot(aes(x=Types_of_Duration,y=avg_rating, fill = Types_of_Duration)) +
+  geom_bar_interactive(stat="identity", width = 0.5,aes(tooltip = round(avg_rating,2))) +
+  scale_y_continuous(breaks = seq(1, 10, by = 0.5)) +  
+    coord_cartesian(ylim=c(5.5,7)) +
+  theme(text = element_text(size=15)) +
+  labs (x = "Duration of Movie",
+        y = "Average Ratings",
+        title ="Ratings of Movies over the years (1990-2019) by duration bins",
+        caption = "Source: IMDB") +
+  theme_linedraw()
+
+girafe(ggobj = duration_bin_rating)
+```
+
+## 4.4 Visualisation of Ratings by Year
+
+### 4.4.1 Scatterplot of Ratings by Year
+
+Based on the scatter plot, there is a general downward trend in ratings over the year. 
+
+```{r message = FALSE, echo = FALSE}
+year_rating <- dataset %>%
+  select(Year,Rating,Movie) %>%
+  distinct() %>%
+  group_by(Year) %>%
+  summarise(avg_rating = mean(Rating)) %>%
+  ggplot((aes(x=Year,y=avg_rating))) +
+  geom_point(aes(color = avg_rating)) +
+  geom_smooth(method ="loess", se = 0.95) +
+  theme(text = element_text(size=20)) +
+  labs (x = "Year of Movie",
+        y = "Average Ratings",
+        title ="Average ratings of movies produced each year from 1990-2019",
+        caption = "Source: IMDB") +
+  theme_linedraw()
+
+ggplotly(year_rating) 
+```
+
+### 4.4.2 Barplot of ratings by year bins
+
+From the bar chart distribution of the 6 5-year bins, we can the same trend where the average rating of movies have some slight fluctuations over the years. However, there is little to no visually significant changes in ratings over the year  
+
+```{r message = FALSE, echo = FALSE}
+
+year_bin_rating <- dataset %>%
+  select(Five_Year,Rating,Movie) %>%
+  distinct() %>%
+  group_by(Five_Year) %>%
+  summarise(avg_rating = mean(Rating)) %>%
+  ggplot(aes(x=Five_Year,y=avg_rating, fill = Five_Year)) +
+  geom_bar_interactive(stat="identity", width = 1.5,fill=getPalette(6), aes(tooltip = round(avg_rating,2))) +
+  coord_cartesian(ylim=c(6.1,6.5)) +
+  scale_x_continuous(breaks = c(1990, 1995, 2000, 2005, 2010, 2015)) + 
+  theme(text = element_text(size=15)) +
+  labs (x = "Year of Movie by Bins",
+        y = "Average Ratings",
+        title ="Ratings of Movies over the years (1990-2019) by Year bins",
+        caption = "Source: IMDB") +
+  theme_linedraw()
+
+girafe(ggobj = year_bin_rating)
+
+```
+
+# 5. Model 
+Model 1: ANOVA  
+Model 2: Correlation  
+Model 3: Simple Linear Regression  
+Model 4: Multiple Linear Regression
+
+**There are two forms of Modelling we can do:**  
+**1. Modelling for Explanation**     
+**2. Modelling for Prediction**   
+Our problem statement requires us to do the first one. We begin with statistical inference to identify which variables are significant. After which we analyse the causation between the variables and rating.   
+
+## Model 1: ANOVA
+Model 1 consists of two parts, ANOVA for the 19 Genres. Followed by Post-Hoc, to do pair-wise comparison between each genre.  
+
+### 1.1.1 Setting up ANOVA hypothesis
+For this model, we want to compare mean ratings across all the genres. We should apply a holistic test to check whether there is evidence that at least one pair groups are in fact different, and this is where ANOVA saves the day.  
+
+We have 19 unique genres in our dataset with varying means. We assume these genres to have met the three conditions to perform ANOVA.  
+1. Independence of genres  
+2. Rating data is normal in each genre  
+3. Variability of rating across genres is about equal  
+
+With these conditions met, we set our hypothesis as follows: 
+$$
+\begin{aligned}
+H_0&: \text{The mean rating across all the genres are equal. In statistical notation,}\  μ_1 = μ_2 =...= μ19 \ \text{where} \ μi \ \text {is the mean of the outcome.} \\
+H_1&: \text{At least one mean is different.}
+\end{aligned}
+$$ 
+Strong evidence favoring the alternative hypothesis in ANOVA is described by unusually large differences among the group means. With this, we test our ANOVA between the genres.
+
+### 1.1.2 ANOVA Table and Interpretation
+
+```{r}
+ANOVA_tidy_genre <- dataset %>% 
+  aov(Rating ~ Final_Genre, .) %>% 
+  tidy()
+
+ANOVA_tidy_genre
+```
+
+**These results show that there's sufficient evidence against null hypothesis with a high F value and low p-value thats extremely close to 0 at a significance level of 0.01.**
+
+With a statistically significant result from ANOVA that shows mean ratings across genres do vary, we now look at conducting a Post-Hoc test. This test allows for a pair-wise comparison between each genre to see which genres are the significant ones.
+
+### 1.1.3 Descriptive statistics and visualisation
+
+Here, our group seeks to visualize confidence intervals instead of relying on P value. As taught in class, confidence intervals are a more robust test, as compared to P value.  
+```{r}
+dataset_linear <- dataset %>%
+  mutate(Final_Genre = fct_relevel(as_factor(Final_Genre), "Documentary"))
+
+Confidence_Interval_calculation <- function(myvariable, myproportion){
+  tmp = summary(lm(myvariable~1))
+  my_se = tmp$coef[2] 
+  my_df = tmp$df[2]  
+  myP = 1 - (0.5 * (1 - myproportion))  
+  my_ci = qt (myP, my_df) * my_se 
+  my_ci
+}
+
+ANOVA_initial <- dataset %>% 
+  group_by(Final_Genre) %>% 
+  dplyr::summarise(sample_mean = mean(Rating,na.rm = T), 
+            confidence_intervals = Confidence_Interval_calculation(Rating, .95)) %>% 
+  mutate(population_mean_lower = sample_mean - confidence_intervals,
+         population_mean_upper = sample_mean + confidence_intervals)
+ANOVA_initial
+
+```
+Visualising the Genres against Rating  
+```{r}
+ANOVA_initial_vis <- ANOVA_initial %>% 
+  ggplot(aes(x = Final_Genre, y = sample_mean)) +
+  geom_point(size = 1.5) +
+  geom_errorbar(aes (ymin = population_mean_lower,
+                     ymax = population_mean_upper), width = 0.5, size = 0.8) +
+  theme_fivethirtyeight() +
+  labs(x = "Genres",
+       y = "Mean Rating of movies",
+       color = " ") +
+  coord_cartesian(ylim = c(5,7.5)) +
+  theme_linedraw () +
+  theme(legend.position = "top") + 
+    theme(axis.text.x = element_text(angle = 20))
+ggplotly(ANOVA_initial_vis)
+
+```
+  
+### 1.1.4 Visualization: Notched boxplot with Mean + confidence interval
+```{r out.width = "90%"}
+boxplot_vis <- dataset %>% 
+  ggplot(aes(x = reorder(Final_Genre,Rating), y = Rating)) +
+  geom_boxplot(aes(color = Final_Genre),
+               notch = T) +
+  stat_summary(fun.data = "mean_cl_boot",
+               geom = "errorbar",
+               color = "purple",
+               fun.args = (conf.int = 0.95),
+               size = 0.5) + 
+  stat_summary(fun.data = "mean_cl_boot",
+               geom = "pointrange",
+               color = "purple",
+               fun.args = (conf.int = 0.95),
+               size = 0.1) + 
+  geom_jitter(aes(color = Final_Genre),
+              alpha = 0.05) + 
+  labs(title = "Rating Analysis of Genres from IMDB dataset",
+       subtitle = "Genres",
+       caption = "Source: IMDB",
+       x = "Genre Names",
+       y = "Rating Scores") +
+theme_linedraw()+
+    theme(axis.text.x = element_text(angle = 20)) + 
+  theme(legend.position = "none",
+        axis.title = element_text())
+boxplot_vis
+
+```
+  
+This visualisation shows the genres against ratings of the IMDB dataset. It is a boxplot arranged from highest median to lowest median rating which also shows the mean and confidence interval. 
+
+However we can still further explore these significant results using post hoc test. This test will allow pairwise comparison of genres
+
+### 1.2.1 Post Hoc Test
+Pairwise comparison between 19 genres
+```{r}
+pairwise_significant <- dataset %>% 
+  aov(Rating ~ Final_Genre,data = .) %>% 
+  TukeyHSD(., which = "Final_Genre") %>% 
+  tidy() %>% 
+  rename(pair = contrast, 
+         sample_M_diff = estimate, 
+         population_M_diff_lower = conf.low, 
+         population_M_diff_higher = conf.high, 
+         adjusted_p = adj.p.value) %>% 
+  select(-term, -null.value) %>% 
+  mutate(include_zero = ifelse(population_M_diff_lower <0 & population_M_diff_higher > 0,"yes", "no")) %>% 
+  filter(include_zero == "no")
+
+as_tibble(pairwise_significant)
+
+```
+**From the original pairwise rows of 19C2 = 171, we are left with 134 significant pairs. Now we evaluate which genres are most significant when it comes to compared with other genres.**  
+
+### 1.2.2 Genre signficance comparison
+```{r}
+pair_significant <- separate(pairwise_significant,pair, c("first", "second"), sep = "-",remove = F)
+pair_significant <- pair_significant[2:3]
+glimpse(pair_significant)
+sapply(pair_significant, function(x) length(unique(x)))
+
+pairwise_genre <- data.frame(genre = c(pair_significant$first, pair_significant$second))
+pairwise_genre %>% 
+  group_by(genre) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+```
+  
+**We now see that all 19 genres have at least 12 other genres with which they have significant results. With a clearer idea of our data, we used the Genre Documentary as our control for the next few models.**  
+
+**The reasoning behind using Documentary comes in 2 forms. Firstly, its mean ratings are significant compared to ALL other genres. Next, it has both the highest mean and median ratings amongst all the genres. This in itself allows us to conduct analysis later for simple linear regression.**  
+
+### 1.3 ANOVA assumption check 
+As we learnt in the final week, ANOVA has 3 checks that need to be met.
+1. Independence of genres
+2. Rating data is normal in each genre
+3. Variability of rating across genres is about equal
+
+For this we will use LEVENE’s test where the null hypothesis is that the variance across all the genres are the same. The alternative hypothesis is that at least one genre has a different variance.  
+```{r}
+dataset %>% leveneTest(Rating ~ as.factor(Final_Genre), data = .)
+```
+**LEVENE’s test shows significant evidence against the null hypothesis at 1% significance level. This means that at least 1 genre has a different variance. Despite the movies being taken across a 30 year time period with at least 1000 votes per movie, with genres that have at least 100 movies, the variance of ratings amongst the genre still defers.**  
+
+## Model 2: Correlation analysis  
+Model 2 consists of correlation analysis between Ratings, Genres, Movie Duration and Number of votes on IMDB webpage. This is a statistical method for us to evaluate the strength of relationship between two quantitative variables.     
+
+In this case, we want to look at the relationship between Ratings and the other variables. A high correlation means that two or more variables have a strong relationship with each other, while a weak correlation means that the variables are hardly related. This is a pre-requisite as well before we can run regression analysis, which will be shown in the rest of our models.
+
+### 2.1 Creating new dichotomous variable for Genres
+```{r}
+dataset2 <- dataset %>% 
+  mutate(Comedy = ifelse(Final_Genre == "Comedy",1,0)) %>% 
+  mutate(Mystery = ifelse(Final_Genre == "Mystery",1,0)) %>% 
+  mutate(Horror = ifelse(Final_Genre == "Horror",1,0)) %>% 
+  mutate(Action = ifelse(Final_Genre == "Action",1,0)) %>% 
+  mutate(History = ifelse(Final_Genre == "History",1,0)) %>% 
+  mutate(`Sci-Fi` = ifelse(Final_Genre == "Sci-Fi",1,0)) %>% 
+  mutate(Drama = ifelse(Final_Genre == "Drama",1,0)) %>% 
+  mutate(Thriller = ifelse(Final_Genre == "Thriller",1,0)) %>% 
+  mutate(Family = ifelse(Final_Genre == "Family",1,0)) %>% 
+  mutate(Romance = ifelse(Final_Genre == "Romance",1,0)) %>% 
+  mutate(Biography = ifelse(Final_Genre == "Biography",1,0)) %>% 
+  mutate(Adventure = ifelse(Final_Genre == "Adventure",1,0)) %>% 
+  mutate(Music = ifelse(Final_Genre == "Music",1,0)) %>% 
+  mutate(Crime = ifelse(Final_Genre == "Crime",1,0)) %>% 
+  mutate(War = ifelse(Final_Genre == "War",1,0)) %>% 
+  mutate(Fantasy = ifelse(Final_Genre == "Fantasy",1,0)) %>% 
+  mutate(Animation = ifelse(Final_Genre == "Animation",1,0)) %>% 
+  mutate(Documentary = ifelse(Final_Genre == "Documentary",1,0)) %>% 
+  mutate(Sport = ifelse(Final_Genre == "Sport",1,0))
+```
+### 2.2 Running correlation matrix     
+Point Biserial correlation: Target genre vs the rest
+```{r echo=TRUE, message=FALSE}
+correlation_matrix <- dataset2 %>% 
+  select(Comedy, Mystery, Horror, Action, History, `Sci-Fi`, Drama, Thriller, Family, Romance,
+         Biography, Adventure, Music, Crime, War, Fantasy, Animation, Documentary, Sport, Duration, Num_of_Votes, Rating) %>% 
+  as.matrix(.) %>% 
+  rcorr(., type = "pearson") %>% #"Pearson" as categorical data not ranked, can't use "spearman" 
+  tidy() %>%  #store your correlational matrix into tbl_df
+  print(n = nrow(.)) %>% 
+  filter(column1 == "Rating") %>% 
+  filter(p.value <= 0.05) #Only showing correlation with Rating
+```
+**From the correlation table, we can see that all genres have significant correlation with Rating. Our group also looked at Rating vs other numerical variables such as Duration and number of votes on movies. This generated a positive and significant correlation as well. Aside from Genre, duration of movies will be the second explanatory variable we will analyse later on.**
+
+### 2.3 Correlation Heatmap 
+```{r}
+correlation_matrix_2  <- correlation_matrix[1:3]
+
+heatmap <- correlation_matrix_2 %>% 
+  ggplot(mapping = aes(y = column1, x = column2)) + 
+  geom_tile_interactive(aes(fill = estimate, tooltip = round(estimate,4), data_id = column2)) + 
+  scale_fill_distiller(palette = "YlGnBu") + 
+  labs(x= "Genre",
+       y = "Rating",
+       title = "Correlation Heat Map",
+       subtitle = "Genres vs Rating") +
+  theme_linedraw() + 
+  theme(legend.position="top") +
+  theme(legend.title = element_text(color = "blue", size = 14),
+        legend.text = element_text(size = 10)) +
+  theme(aspect.ratio=1/15) + 
+  theme(axis.text.x = element_text(angle = 20)) + 
+  theme(axis.text = element_text((size = 6)))
+
+girafe(ggobj = heatmap)
+```
+
+## Model 3: Simple Linear Regression analysis
+
+Model 3 consists of simple linear regression, which is a statistical method that allows us to summarise and study relationships between Ratings and Genre. Since regression requires both variables to be continuous variable, our `Final_Genre` will be converted into a numerical variable through as.factor.   
+
+In order to ensure Time Lag in our analysis, we use the “Post-Test” only design where we set Documentary Genre as the control for it to become a pre-test measure. The reason why we selected documentary is from our previous Anova analysis, where it is seen as having significant mean differences with all other genres, as well as having the highest average ratings.  
+
+### 3.1 Setting Documentary as control 
+```{r}
+dataset3 <- dataset %>% #change original_data to original_data_test
+  mutate(Final_Genre = fct_relevel(as_factor(Final_Genre), "Documentary"))
+```
+### 3.2 Constructing Linear Regression  
+```{r}
+lm_regression <- lm(Rating ~ Final_Genre, data = dataset3)
+```
+
+### 3.3 Looking at variable and model-level information
+```{r}
+lm_tidyverse_variables <- lm_regression %>% tidy() #variable-level information
+lm_tidyverse_model <- lm_regression %>% glance
+
+combined_model <- export_summs(lm_regression, model.names = "Regression of Genre against Ratings",
+                  error_format = "p = {p.value}",
+                  digits = 3)
+combined_model
+```
+
+### 3.4 Presenting results using Kable
+```{r}
+kable_initial_regression_result <- kable(tidy(lm_regression)) %>% 
+  kable_paper("striped", full_width = F) %>% 
+  column_spec(c(1,5), bold = T) %>% 
+  row_spec(c(2,4,6,8,10,12,14,16,18), bold = T,
+           color = "white", background = "blue")
+kable_initial_regression_result
+```
+**From regression table, our group was able to identify the R^2 value as 0.15, with all the estimates being significant based on p value. This implies that the 15% of variance in Ratings can be explained by genre.**  
+
+### 3.5 Mean Rating and confidence intervals of Genres
+Our group then went ahead in calculating the confidence intervals of Genre, as well as run ANOVA modelling, this time with Documentary as a control variable.
+```{r}
+ANOVA_final <- dataset3 %>% 
+  group_by(Final_Genre) %>% 
+  dplyr::summarise(sample_mean = mean(Rating,na.rm = T), #remove NA values
+            confidence_intervals = Confidence_Interval_calculation(Rating, .95)) %>% 
+  mutate(population_mean_lower = sample_mean - confidence_intervals,
+         population_mean_upper = sample_mean + confidence_intervals)
+ANOVA_final
+```
+**From this table, our group observes that the mean of Documentary Genre at 95% confidence interval is significantly higher than the rest of the genre due to having no overlaps. This support our analysis earlier.**  
+
+### 3.6 Error bar visualisation of Genre and Sample mean
+We then proceeded with using Error Bar visualization to show the mean value of each genre at 95% confidence interval.    
+```{r}
+ANOVA_final_vis <- ANOVA_final %>% 
+  ggplot(aes(x = Final_Genre, y = sample_mean)) +
+  geom_point(size = 1.5) +
+  geom_errorbar(aes (ymin = population_mean_lower,
+                     ymax = population_mean_upper), width = 0.5, size = 0.8) +
+  theme_fivethirtyeight() +
+  geom_hline(yintercept = 7.25, color = "deepskyblue4", size = 1.5)  +
+  geom_hline(aes(yintercept = mean(sample_mean)), color = "red", size = 1.5)  +
+  labs(x = "Genres",
+       y = "Mean Rating of movies",
+       title = "Mean Rating of Genres at 95% Confidence Interval",
+       subtitle = "Ratings for Documentary is significantly better than the other Genres.\n7 genres: Drama, Biography, Music, War, Animation, History and Sport have significantly\n better ratings than the mean ratings across all genres.",
+       caption = "Source: IMDB Database") +
+  coord_cartesian(ylim = c(5,7.5)) +
+  theme_linedraw () +
+  theme(legend.position = "top") +
+   theme(axis.text.x = element_text(angle = 90))
+
+ggplotly(ANOVA_final_vis)
+```
+    
+**The blue horizontal line indicates the lower confidence interval of the mean of Documentary Genre. We can clearly see that the mean rating of Documentary is significantly higher than the rest of Genres as explained earlier. The red horizontal line indicates the mean rating of all genres. Our group observes that there are 7 genre, aside from Documentary, with mean rating higher than the overall mean across all genres. They are Drama, Biography, Music, War, Animation, History and Sport.**    
+
+### 3.7 Linear model assumption check
+We seek to confirm the Linear Model Assumption by running GVLMA.  
+```{r} 
+gvlma(lm_regression) 
+autoplot(gvlma(lm_regression))
+```
+  
+From the results, our group noticed that the skewness assumption is NOT met.  
+
+We then proceed with modelling to check the skewness of Ratings variable, whether is it left or right skewed.    
+```{r}
+skewness_graph <- lm_regression %>% 
+  ggplot(aes(x=Rating)) +
+  geom_density(fill = "tomato3", alpha = 0.3)
+```
+From the visualization, we noticed that the graph is left-skewed.  
+
+Our group chose to utilize square-root transformation to fix the skewed Ratings variable and ran the GVLMA again.
+```{r}
+original_data_4 <- dataset3
+original_data_4$Rating <- sqrt(max(dataset3$Rating + 1) - dataset3$Rating)
+
+lm_regression2 <- lm(Rating ~ Final_Genre, data = original_data_4)
+summary(lm_regression2)
+
+gvlma(lm_regression2)
+```
+
+Upon running GVLMA analysis on the new model, we realised that while skewness is now fixed, the Global Stat and Kurtosis assumptions are still not satisfied.  
+
+Thus, we tried using the sandwich method for the kurtosis method.  
+```{r}
+summ(lm_regression2, robust = "HC3", cluster = "firm" )
+gvlma(lm_regression2)
+```
+However this method still failed. As such, our group decided to treat this as one of the limitations of our dataset.   
+
+## Model 4: Multiple Linear Regression Analysis    
+Multiple Linear Regression is similar to Simple Linear Regression, with the exception that it uses several explanatory variables to explain the response variable. In this case, aside from Genre, we are adding in an additional variable; Movie Duration. We chose Movie Duration due to the earlier correlation results, where it has the highest correlation estimate.   
+
+We decided to shortlist the Top 5 Genres within `Final Genre` for more robust analysis based on their correlation estimates. These genres are Documentary, Drama, Biography, Horror and thriller. all of which have very significant correlations with Ratings.  
+  
+### 4.1 Multi Linear Regression without interaction  
+```{r}
+original_data_test <- dataset %>% 
+  filter(Final_Genre == "Documentary" | Final_Genre == "Drama" | Final_Genre == "Biography" | Final_Genre == "Horror" | Final_Genre == "Thriller")
+
+original_data_3 <- original_data_test %>% #change original_data to original_data_test
+  mutate(Final_Genre = as_factor(Final_Genre))
+
+multi_test <- lm(Rating ~ Final_Genre + Duration, data = original_data_3)
+```
+
+4.1.1  Assess multicollinearity using *vifs* argument  
+```{r}
+summ(multi_test, vifs = T)
+```
+**From the table, we can see that VIFs value are all below 4. hence, all the explanatory variables that should not be correlated with each other are not correlated.**
+
+4.1.2 Mean-centering variables using *center* argument     
+  
+The reason why we run mean-centering argument is because for Duration, it does not make sense for a movie rating to increase by the same amount, from 1 to 2 minutes, as compared to 120 to 121 minutes. 
+```{r}
+summ(multi_test, center = T)
+```
+
+4.1.3 Visualisation  
+  
+First, our group ran effect plot to visualize the mean rating of Genre as compared to Ratings.    
+```{r}
+effect_plot(multi_test,
+            pred = Final_Genre,
+            interval = T,
+            plot.points = T) +
+  ylim(5,8) +
+  annotate("text",
+           x = 1,
+           y = 7.7,
+           label = "paste(italic(R)^2, \" = 0.31\")",
+           size = 5,
+           color = "tomato3",
+           parse = T)
+```
+   
+Since confidence intervals clearly did not overlap, our group concludes that the mean ratings of the top 5 Genres are significantly different from each other.  
+
+Second, our group ran effect plot again, this time to visualize durations as compared to Ratings.   
+```{r}
+effect_plot(multi_test,
+            pred = Duration,
+            interval = T,
+            plot.points = T) +
+  ylim(3,10) +
+  xlim(0,300) +
+  annotate("text",
+           x = 8,
+           y = 7.7,
+           label = "paste(italic(R)^2, \" = 0.31\")",
+           size = 5,
+           color = "tomato3",
+           parse = T)
+```
+  
+From this regression line, we can clearly see that there is a positive relationship between Ratings and Duration.  
+
+Lastly, our group used plot_summs to visualize the regression coefficients, showing the confidence intervals.
+```{r}
+summ(multi_test, confint = T, digits = 4)
+```
+From this table, we can infer the range of coefficients of each genre and duration at 95% confidence interval. For example, Horror will be between -1.18 and -1.06 lower than the intercept when looking at its ratings.  
+
+This visualization shows the interpretation of variance in regression coefficients as explained in the table above.  
+```{r}
+plot_summs(multi_test, scale = T, plot.distributions = T)
+```
+
+4.1.4 Checking for Linear Model Assumption  
+```{r}
+gvlma(multi_test)
+autoplot(gvlma(multi_test))
+```
+  
+Once again, our group ran the GVLMA to check for Linear Model Assumption. Unfortunately, the model fails the test and this will be included as part of our limitations.  
+
+### 4.2 Multiple Linear Regression with interaction
+**Previously, our Multiple Linear Regression without Interaction, investigates only the main effects of Genre and Movie Duration on Ratings. It assumes that the relationship between a given explanatory variable and the outcome is independent of the other explanatory variable. However, this might not be true. For example, Thriller Genre may only be rated lower than Documentary Genre when the movie duration is very short. However, when the movie is long, Thriller Genre may become more highly rated than Documentary Genre.**   
+
+**Hence, we now want to look at the regression coefficients associated with the main and interaction effects of Genre and Movie Duration on Ratings.**  
+```{r}
+multi_test_2 <- lm(Rating ~ (Final_Genre) * Duration, data = original_data_3)
+```
+
+4.2.1 Mean-centering variables using *center* argument.  
+   
+     
+The reason why we run mean-centering argument is because for Duration, it does not make sense for a movie rating to increase by the same amount, from 1 to 2 minutes, as compared to 120 to 121 minutes.  
+```{r}
+summ(multi_test_2, center = T)
+```
+
+4.2.2 Linear model assumption check    
+```{r}
+gvlma(multi_test_2)
+autoplot(gvlma(multi_test_2))
+```
+       
+  
+Once again, our group ran the GVLMA to check for Linear Model Assumption. Unfortunately, the model fails the test and this will be included as part of our limitations.  
+
+### 4.3 Regression Models Comparison
+Over here, our group now wants to check if there is significant improvement in explanatory performance in the 2nd regression model with interaction, as compared to the one without.  
+```{r}
+export_summs(multi_test, multi_test_2,
+             model.names = c("Main Effects", "With Interactions"),
+             error_format = "[{conf.low}, {conf.high},
+             p = {p.value}",
+             digits = 3)
+```
+The insertion of duration as a moderating variable helped to increase the explanatory power of our model. This is shown by the increase in R^2 value of 0.016.  
+
+Next, while explanatory power has increased, we wanted to ensure that this is indeed true by looking at its significance.  
+
+Our group now runs annova to check if the increase in R^2 value is indeed significant.    
+```{r}
+anova(multi_test, multi_test_2)
+```
+Since the p-value is near 0, this proves that Model 2, with duration as a moderating variable, is indeed better than model 1 in terms of explanatory power. We will now move on to probe the interaction effect.  
+
+### 4.4 Probing Interaction Effect 
+There are 4 steps to analyse the interaction effect of Duration on Genre and Ratings.   
+
+**Step 1: Plot interaction using interact_plot().**       
+
+First, we ran an interact plot to see how Genre, as a moderating variable, affect the relationship between Rating and Duration. For this part of analysis, we swapped Genre, instead of Duration, as the moderating variable. This is because Interact Plot can only take a continuous variable as its explanatory variable.  
+```{r}
+interact_plot(multi_test_2, # plug in your model 
+              pred = Duration, # X1 variable: Predictor
+              modx = Final_Genre, # X2 variable (Moderator)
+              #modx.labels = c("Male", # = 0
+              #                "Female"), # Labels for Moderator
+              interval = T, # Show Confidence Intervals
+              # mean-centering centered = "all", 
+              int.width = 0.95, # confidence interval
+              #colors = c("tomato3", 
+              #           "dodgerblue3"), # Colors for Moderator
+              vary.lty = T, # create different shapes for each line (lty = linetype; color; colour; col)
+              line.thickness = 1,
+              legend.main = "Movie Genre")
+```
+  
+From the Interact Plot, it seems that there is a positive relationship between Ratings and Duration. This is seen for all 5 movie genres.  
+
+**Step 2: Run simple slopes analysis**     
+```{r}
+sim_slopes(multi_test_2, #Plug in your model
+           pred = Duration,
+           modx = Final_Genre,
+           johnson_neyman = F)
+```
+From the results, we found out that across all 5 Genres, the positive correlation between duration and ratings mentioned earlier is very significant.  
+
+**Step 3: Spotlight analysis**      
+
+```{R}
+# sim_slopes(multi_test_2, 
+#          pred = Final_Genre,
+#          modx = Duration,
+#          johnson_neyman = T) 
+```
+We tried running a spotlight analysis. However, we are unable to do so due to Genre being a categorical variable. As such, we will be using the confidence interval from our visualization later on to make interpretations.  
+
+**Step 4: Using confidence interval to show difference between genre.**       
+```{r}
+interact_plot(multi_test_2, # plug in your model 
+              pred = "Duration", # X1 variable: Predictor
+              modx = "Final_Genre", # Numerical Moderator (M - 1SD, M, M + 1SD)
+              #modx.labels = c("Low Education (M - 1SD)", # NS
+              #                "Average Education", # p = 0.03
+              #                "High Education (M + 1SD"), # p = 0.00,
+              interval = T, #
+              # mean-centering centered = "all", 
+              int.width = 0.95, #shrink confidence interval since it is overlapping at 95% confidence interval
+              #colors = c("dodgerblue", 
+              #           "tomato3",
+              #           "darkgreen"),
+              vary.lty = T,
+              line.thickness = 1,
+              legend.main = "Movie Genre") +
+  ylim(4,10) +
+  xlim(50,250)+
+  geom_vline(xintercept = 140, col = "red", linetype = 1, size = 1) +
+  geom_vline(xintercept = 200, col = "blue", linetype = 1, size = 1) +
+  labs(title = "The Interplay of Movie Genre and Duration on Ratings",
+       subtitle = "For shorter movies below 140 minutes, Thriller and Horror Genre score worse in Movie Ratings than other genres.\nHowever, this trend is reversed, which sees Thriller claims top spot as the movie duration increases past 200 minutes.",
+       x = "Movie Duration", 
+       y = "Movie Ratings",
+       caption = "Source: IMDB Dataset") +
+  annotate("text", 
+           x =120, 
+           y = 9,
+           label = "The shaded areas denote 95% confidence intervals.\nThe vertical line marks the boundary\nbetween regions of significance and non-significance\nbased on confidence intervals") + 
+  theme(legend.position = "top",
+        text = element_text(family = "Courier"))
+```
+  
+The relationships between duration and ratings of movies are similar across all 5 movie genres. Specifically, there appears to be a positive relationship between Ratings and Duration. Thus, movie directors should aim to have longer movies as it seems to generate higher ratings for the 5 genres we have analysed here: Documentary, Drama, Horror, Thriller and Biography. This is especially true for Thriller and horror, as they enjoy steeper increase in ratings when duration increases.  
+
+For movies below 140 minutes, it seems to be the case that the top 3 genres are Documentary,Biography and Drama. However, past 200 minutes, the top genre switches to Thriller, owning to its stronger positive correlation between ratings and duration.
+
+### 4.5 Notched Boxplot of Interaction effect
+
+Thriller and Horror have a steep increase as duration increases. **In order to confirm the interaction effect of duration**, we decided to do a notched boxplot with mean summary stat and confidence intervals. This allows us to see how the ratings changes for our data across genres as the duration increases. 
+```{r}
+original_data_3$reordered_Types_of_Duration <- factor(original_data_3$Types_of_Duration, levels = c("Very Short","Short", "Just Nice","Long", "Extremely Long"))
+
+original_data_3 %>% 
+  ggplot(aes(x = reorder(Final_Genre,Rating), y = Rating)) +
+  geom_boxplot(aes(color = Final_Genre),
+               notch = T) +
+  stat_summary(fun.data = "mean_cl_boot",
+               geom = "errorbar",
+               color = "purple",
+               fun.args = (conf.int = 0.95),
+               size = 0.5) + 
+  stat_summary(fun.data = "mean_cl_boot",
+               geom = "pointrange",
+               color = "purple",
+               fun.args = (conf.int = 0.95),
+               size = 0.1) + 
+  geom_jitter(aes(color = Final_Genre),
+              alpha = 0.05) + 
+  facet_wrap(.~reordered_Types_of_Duration, ncol = 5) + 
+  #facet_wrap(vars(Types_of_Duration), ncol = 5L) + 
+  labs(title = "Interaction effect confirmation using dataset",
+       subtitle = "Thriller and Horror rating increase steeply as duration increases",
+       caption = "Source: IMDB",
+       x = "Genre Names",
+       y = "Rating Scores") +
+  theme_linedraw() + 
+  theme(axis.text.x = element_text(angle = 20)) + 
+  theme(legend.position = "none",
+        axis.title = element_text())
+```
+  
+**Eureka! We found that from our data, Horror Genre increased from 5.4 to 6.3. As for Thriller, the increase was 5.5 to 6.9. Meanwhile, Documentary increased only from 7.3 to 7.7.**
+
+# 6. Interpretation of the Results
+
+From our data science project, we could find the following two findings:
+
+1. From our ANOVA and Post-Hoc analysis, it is confirmed that all the 19 genres have at least 12 other genres with which they have significantly different means. It shows that there is significant evidence that the type of genre affects the ratings. From the 19 genres, Documentary and Horror are the 2 genres that have ratings that are statistically significant to ALL other genres.
+
+2. The relationships between duration and ratings of movies are similar across all 5 movie genres. Specifically, there appears to be a positive relationship between Ratings and Duration. Thus, movie directors should aim to have longer movies as it seems to generate higher ratings for the 5 genres we have analysed here: Documentary, Drama, Horror, Thriller and Biography. This is especially true for Thriller and horror, as they enjoy steeper increase in ratings when duration increases.  
+
+For movies below 140 minutes, it seems to be the case that the top 3 genres are Documentary,Biographgy and Drama. However, past 200 minutes, the top genre switches to Thriller, owning to its stronger positive correlation between ratings and duration.  
+
+Horror and Thriller had an increase of 24% and 25.5% respectively while Documentary only increased 5.5%. We can see that the increase in our data match the predicted data from the visualisation from our multi linear regression above.However, even though Horror and Thriller are predicted to be higher rated as duration increases, it must be noted that most movies do not exceed 200 minutes in length.
+
+# 7. Further Exploration: Movies Maker Assistant R SHINY APP
+  
+To allow potential users (i.e Directors, Production Company Executives)  to further explore the characteristics of movies in different genres, our group has created an interactive segment using `Shiny` package.
+  
+According to a study conducted, there is strong link between search volume and box office receipts (Raehsler, 2013). Hence, our group has decided to examine this claim by providing the relative Google search volume (using Google Trends) of the movie title from 1 month before to 1 year after the release date of the movie.  
+  
+Additionally, we have also used `httr` package to make HTTP Request to Movie Database API (hosted on [RapidAPI]("https://rapidapi.com/rapidapi/api/movie-database-imdb-alternative/endpoints")) to retrieve movie descriptions based on the title input. Then, we proceed to generate word cloud for the descriptions and perform sentiment analysis to assist potential users in understanding how to create top rating movies in each genre.  
+
+## 7.1 R SHINY APP 
+  
+a) **Top 10 best and worst rated movies** in the selected genre.  
+b) **Google Trends search volume visualisation** for the top and worst movie in the selected genre.  
+c) **Movie Database API** to retrieve description for the top 10 best and worst rated movies.  
+d) **Wordcloud of the descriptions** in step c); one for the group of best movies and one for the worst.   
+e) **Sentiment Analysis on the description** in step c); one for the group of best movies and one for the worst.   
+
+You can run this SHINY interactive document hosted at the local server by running the RMarkdown file, **OR** navigate to our deployed application at [SHINY_IMDB](https://moviesmakerassistance.shinyapps.io/try_shiny_dropdown_genre_1/) for a full online experience.
+
+
+```{r echo = FALSE, error = FALSE, message=FALSE}
+
+get_description <- function(movie_list) {
+  result <- c()
+
+  for (i in 1:length(movie_list)) {
+    url <- "https://movie-database-imdb-alternative.p.rapidapi.com/"
+
+    queryString <- list(
+      t = movie_list[i],
+      r = "json"
+    )
+
+    response <- GET(url, add_headers("x-rapidapi-key" = '15144c1dfemshaf1c02563d16c51p1566d7jsn925f71e1209f', "x-rapidapi-host" = 'movie-database-imdb-alternative.p.rapidapi.com'), query = queryString, content_type("application/octet-stream"))
+    data = fromJSON(rawToChar(response$content))
+    result <- c(result, data$Plot)
+  }
+
+  return(data.frame(name = movie_list, description = result))
+}
+
+clean_data <- function(review_df) {
+  tidy_data <- review_df %>%
+    unnest_tokens(word, description) %>%
+    group_by(word) %>%
+    filter(n() > 0) %>%
+    ungroup()
+
+  stop_words <- stop_words
+  customized_stop_words <- c("film", "movies", "films")
+
+  tidy_data <- tidy_data %>%
+    anti_join(stop_words) %>%
+    filter(!word %in% customized_stop_words)
+
+  return(tidy_data)
+}
+
+create_frequency_table <- function (tidy_data) {
+
+  frequency_table <- tidy_data %>%
+    group_by(word) %>%
+    summarise(frequency = n()) %>%
+    arrange(desc(frequency))
+
+  return(frequency_table)
+}
+
+perform_sentiment_analysis <- function(description_data) {
+  tokenized_description <- description_data %>%
+    unnest_tokens(word, description) %>%
+    anti_join(stop_words)
+
+  AFINN <- get_sentiments("afinn")
+
+  sentiments_description <- tokenized_description %>%
+    inner_join(AFINN, by="word") %>%
+    group_by(name) %>%
+    summarise(sentiment = mean(value), words = n())
+
+  return(sentiments_description)
+}
+
+movies_url_by_genre <- read_csv(here("genre_movies.csv"))
+
+```
+
+
+```{r echo = FALSE, error = FALSE, message=FALSE}
+selectInput("genres","Select a Genre",
+              choices =  c(unique(as.character(dataset$Final_Genre))))
+
+# a. Top-rated and Lowest Rated Movie based on selected genre
+
+getTopMovies <- reactive({
+  dataset %>%
+  filter(Final_Genre == input$genres) %>%
+  select(Movie, Rating) %>%
+  arrange(desc(Rating)) %>%
+  slice(1:10)
+})  #Get Top-rated Movies based on genre selected
+
+getBottomMovies <- reactive({
+  dataset %>%
+  filter(Final_Genre == input$genres) %>%
+  select(Movie, Rating) %>%
+  arrange(Rating) %>%
+  slice(1:10)
+}) #Get Lowest-rated Movies based on genre selected
+
+fluidRow(
+  column(4,
+        renderText(paste("Top-rated Movies of", input$genres), sep=" ")
+        ),
+  column(4,
+        renderText(paste("Lowest-rated Movies of", input$genres), sep=" ")
+        ),
+)
+
+fluidRow(
+
+    column(4,
+          renderTable({
+            getTopMovies()
+          }
+      )
+    ),
+      column(4,
+        renderTable({
+            getBottomMovies()
+          }
+      )
+    )
+)
+
+
+```
+
+**Google Trends search volume visualisation**
+
+```{r echo = FALSE, error = FALSE, message=FALSE}
+
+topmovie_df <- reactive({
+    release_date <- unname(unlist(movies_url_by_genre[which(movies_url_by_genre$Final_Genre == input$genres),][,-1][1,3]))[1]
+    top_movie <- unname(unlist(movies_url_by_genre[which(movies_url_by_genre$Final_Genre == input$genres),][,-1][1,1]))[1]
+
+   asiam <- gtrends(keyword = c(top_movie),
+                         geo = "US",
+                         gprop = "web",
+                           time = release_date)
+
+  asiam_df <- asiam$interest_over_time
+  asiam_df$hits <- as.numeric(asiam_df$hits)
+
+  asiam_df %>%
+    mutate(year = year(date),
+           month = month(date),
+           new_date = date(date))
+})
+
+bottommovie_df <- reactive({
+
+  release_date <- unname(unlist(movies_url_by_genre[which(movies_url_by_genre$Final_Genre == input$genres),][,-1][1,4]))[1]
+
+  bottom_movie <- unname(unlist(movies_url_by_genre[which(movies_url_by_genre$Final_Genre == input$genres),][,-1][1,2]))[1]
+
+  asiam <- gtrends(keyword = c(bottom_movie),
+                         geo = "US",
+                         gprop = "web",
+                        time = release_date)
+
+  asiam_df <- asiam$interest_over_time
+  asiam_df$hits <- as.numeric(asiam_df$hits) # safety measure hits "<1"
+
+  asiam_df %>%
+    mutate(year = year(date),
+           month = month(date),
+           new_date = date(date)) # Month-Year
+})
+
+renderPlot({
+
+  topChart <- topmovie_df() %>%
+    ggplot(aes(x = new_date, y = hits, group = keyword)) +
+    geom_point(aes(color = keyword, shape = keyword)) +
+    geom_smooth(method = "loess", formula = y ~ x, level = 0.95, aes(color=keyword)) +
+    scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+    labs(x = "Month",
+         y = "Search Volumes",
+         title = paste("Best-Performed Movie of", input$genres, sep=" "),
+         subtitle = "Google Search Volume:\nFrom 1 month before its release to 1 year since its release",
+         caption = "Source: Google Trends") +
+    ggthemes::theme_fivethirtyeight() +
+    theme(axis.text.x = element_text(angle = 20))
+
+  bottomChart <- bottommovie_df() %>%
+    ggplot(aes(x = new_date, y = hits, group = keyword)) +
+    geom_point(aes(color = keyword, shape = keyword)) +
+    geom_smooth(method = "loess", formula = y ~ x, level = 0.95, aes(color=keyword)) +
+    scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+    labs(x = "Month",
+         y = "Search Volumes",
+         title = paste("Worst-Performed Movie of", input$genres, sep=" ") ,
+         subtitle = "Google Search Volume:\nFrom 1 month before its release to 1 year since its release",
+         caption = "Source: Google Trends") +
+    ggthemes::theme_fivethirtyeight() +
+    theme(axis.text.x = element_text(angle = 20))
+
+grid.arrange(topChart, bottomChart, ncol = 2)
+})
+
+```
+
+**Movie Description retrieved from Movie Database API**
+
+```{r echo = FALSE, error = FALSE, message=FALSE}
+
+get_top_description <- reactive({
+  get_description(getTopMovies()$Movie)
+})
+
+get_bottom_description <- reactive({
+  get_description(getBottomMovies()$Movie)
+})
+
+renderTable({
+  get_top_description()
+})
+
+renderTable({
+  get_bottom_description()
+})
+
+```
+
+**Word Cloud of the movie description**
+
+```{r echo = FALSE, error = FALSE, message=FALSE}
+
+get_frequency_table_top <- reactive({
+  tidy_data <- clean_data(get_top_description())
+  frequency_table <- create_frequency_table(tidy_data)
+})
+
+get_frequency_table_bottom <- reactive({
+  tidy_data <- clean_data(get_bottom_description())
+  frequency_table <- create_frequency_table(tidy_data)
+})
+
+renderPlot({
+
+  top_word_cloud <- get_frequency_table_top() %>%
+    ggplot(aes(label = word, size = frequency, color = word)) +
+    geom_text_wordcloud_area(rm_outside = TRUE) +
+    scale_size_area(max_size = 40) +
+    theme_minimal()
+
+  bottom_word_cloud <- get_frequency_table_bottom() %>%
+    ggplot(aes(label = word, size = frequency, color = word)) +
+    geom_text_wordcloud_area(rm_outside = TRUE) +
+    scale_size_area(max_size = 40) +
+    theme_minimal()
+
+  grid.arrange(top_word_cloud, bottom_word_cloud, ncol = 2)
+
+})
+
+```
+
+**Sentiment Analysis of the movie description**
+
+```{r echo = FALSE, error = FALSE, message=FALSE}
+
+renderTable({
+  perform_sentiment_analysis(get_top_description())
+})
+```
+
+
+## 7.2 Implications of SHINY APP analysis
+**Based on the above application, it appears that the relative google trend search volume does not differ much between the top rated movies and the lowest rated movies. Furthermore, it should be noted that the Google trend analysis only provides relative search volume over time and cannot convincingly tell if a movie does indeed have a large number of searches.** 
+
+**Lastly, the sentiment analysis and the word cloud serve as additional guidance for movie directors and should not be seen as the exhaustive list of considerations.**  
+
+# 8. Limitations and Future Directions   
+
+## 8.1 Limitations   
+
+1st limitation: For the purpose of this project, the team has used the official IMDB dataset that has limited variables. While there are other more comprehensive datasets on Kaggle that are scraped from IMDB's website, it is against IMDB's terms of use. Hence, we have decided to use the official data provided by IMDB.   
+
+Given the limited dataset, our project can only analyse genre, the duration of the movie and the movie release year. However, the success of a movie (in terms of ratings) is dependent on many other factors such as movie budget, directors, cast etc.  
+
+2nd limitation: The dataset used is not as robust as compared to proper AB testing. When conducting a survey, there will be steps taken to get a representative sample and the same respondent will answer all the questions. However, on IMDB, different users will provide ratings for different movies. Thus, the movie ratings are from a different population, resulting in heterogeneity of variance, failing the LEVENE's test.  
+
+## 8.2 Future Direction   
+
+As mentioned in limitation 1, using the official IMDB data only provides a small number of variables. Hence, future projects could analyse other important variables such as budget, revenue, cast and directors, age of IMDB voters and others to provide deeper insights on how to create a successful movie that can target different genres, demographics and age groups.   
+
+There is huge potential for directors to use data analytics to understand how to create a successful movie. Currently, our R SHINY application allows a user (i.e director) to specifically sieve elements from the top and bottom movies in each genre. This SHINY app can be further developed to include age, country, duration, specific themes of a movie using word clouds and many other visualisations. This program could be improved to allow directors to add different inputs to analyse the best direction to make a successful movie. On top of analysing the factors to improve ratings, the factors to increase the return of investment can also be added.   
+
+# 9. Contribution Statement
+**Every member contributed equally in their own ways, putting their best foot forward for this project. The contribution statement merely states who took charge of different aspects of this project, but each person was involved in the decision making and ideating process.**
+
+Anish: Modelling for ANOVA and POST-HOC. Transforming graphs into interactive visualisations using ggplotly and igraph. Combined and stich together rmarkdown to create flow. 
+
+Bang: Creating the random generator for selecting genre during the tidy and transform process. Creating the R SHINY app that combined google trends, wordcloud by web scraping data off Rotten Tomatoes. 
+
+Jim Meng: Cleaning, tidying and transforming the data from IMDB. Exploratory data analysis as well as tinkering with the Rmarkdown chunk notations. Scraping Google trends data to be used for R SHINY app. 
+
+Joel: Exploratory Data Visualisation as well as communications aspect of project. Supporting R SHINY and data scraping processes. 
+
+Yi Rui: Continuously brought together the problem statement, flow and dataset to achieve the aim of the project. Modelling for correlation and the various regressions.
+
+**Each member supported the other aspects of this project as and when needed while focusing on their individual strengths to achieve the final aim** 
+
+# 10. References
+
+> IMDb. (n.d.). *IMDb Datasets.* Retrieved from https://www.imdb.com/interfaces/ \
+> \
+> Hall, S., Neale, S., & Project Muse. (2010). *Epics, Spectacles, and Blockbusters: A Hollywood History.* Detroit, Mich: Wayne State University Press.
+> \
+> Raehsler, L. (2013). *How People Search For Movies on Google Predicts Box Office Revenues.* Retrieved on November 22, 2020 from https://www.searchenginewatch.com/2013/06/06/how-people-search-for-movies-on-google-predicts-box-office-revenues-study/ \
+> \
+> \
+> Information courtesy of\
+> IMDb\
+> (http://www.imdb.com).\
+> Used with permission.\
+> \
+> \
+> R SHINY app movie description and details, information courtesy of\
+> Rotten Tomatoes\
+> (https://www.rottentomatoes.com/).\
+> Used by webscraping.\
+> \
+> \
+> R SHINY app Google Trends, information courtesy of\
+> Google Trends\
+> (https://trends.google.com/).\
+> Using gtrendsR package.\
